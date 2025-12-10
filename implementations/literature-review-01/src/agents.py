@@ -4,9 +4,9 @@ Each agent has a specific role in the literature review pipeline.
 """
 
 from autogen_agentchat.agents import AssistantAgent
-from src.tools import Search_arXiv
-from src.prompts import RESEARCHER_PROMPT, REVIEWER_PROMPT, WRITER_PROMPT
-from src.config import ModelConfig, AgentConfig
+from tools import Search_arXiv
+from prompts import RESEARCHER_PROMPT, REVIEWER_PROMPT, WRITER_PROMPT
+from config import ModelConfig, AgentConfig
 from autogen_ext.models.ollama import OllamaChatCompletionClient
 
 
