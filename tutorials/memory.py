@@ -1,39 +1,79 @@
-import asyncio 
-from autogen_core.memory import ListMemory, MemoryContent
-from autogen_core.model_context import BufferedChatCompletionContext
-from autogen_core.models import UserMessage
+import asyncio
+from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.ui import Console
+from autogen_core.memory import MemoryContent
+from autogen_ext.memory.mem0 import Mem0Memory
+from autogen_ext.models.ollama import OllamaChatCompletionClient
 
 async def main() -> None:
     
-    memory = ListMemory(name="chat_history_testing")
+    # --- 1. CONFIGURE LOCAL MEMORY (With Nomic Embeddings) ---
+    local_mem0_config = {
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "path": "./local_mem0_db" 
+            }
+        },
+        "embedder": {
+            "provider": "ollama",
+            "config": {
+                "model": "nomic-embed-text:latest"  # <--- UPDATED HERE
+            }
+        },
+        "llm": {
+            "provider": "ollama",
+            "config": {
+                "model": "llama3.1:8b",
+                "temperature": 0
+            }
+        }
+    }
 
-    content_test1 = MemoryContent(content="User prefers formal language", mime_type="text/plain")
-    await memory.add(content_test1)
-    model_context = BufferedChatCompletionContext(buffer_size=3)
+    print("Initializing Local Memory with Nomic Embeddings...")
+    mem0_memory = Mem0Memory(
+        is_cloud=False,
+        config=local_mem0_config,
+        limit=5,
+    )
 
-   
+    # --- 2. ADD DATA ---
+    await mem0_memory.add(
+        MemoryContent(
+            content="The weather should be in metric units",
+            mime_type="text/plain", 
+            metadata={"category": "preferences", "type": "units"},
+        )
+    )
 
-    small_message = UserMessage(content="Hello im from canada", source="user")
-    
-    await model_context.add_message(small_message)
+    await mem0_memory.add(
+        MemoryContent(
+            content="Meal recipe must be vegan",
+            mime_type="text/plain",
+            metadata={"category": "preferences", "type": "dietary"},
+        )
+    )
 
-    content_test2 = MemoryContent(content="User said it is alergic to garlic bread", mime_type="text/plain")
-    content_test3 = MemoryContent(content="the user asked about help to cook a banana", mime_type="text/plain")
+    # --- 3. CONFIGURE AGENT CLIENT ---
+    ollama_client_llama = OllamaChatCompletionClient(
+        model="llama3.1:8b", 
+        options={
+            "temperature": 0.7,
+            "top_k": 50,
+        }
+    )
 
-   
-  
-    await memory.add(content_test2)
-    await memory.add(content_test3)
+    # --- 4. CREATE AGENT ---
+    assistant_agent = AssistantAgent(
+        name="assistant_agent",
+        model_client=ollama_client_llama,
+        memory=[mem0_memory],
+    )
 
-    await memory.update_context(model_context)
+    # --- 5. RUN ---
+    print("\n--- Running Task ---")
+    stream = assistant_agent.run_stream(task="What are my dietary preferences?")
+    await Console(stream)
 
-
-
-    last = await model_context.get_messages()
-
-    print(last[0].content)
-
-
-
-
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
