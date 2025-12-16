@@ -100,7 +100,7 @@ ollama_client_granite = OllamaChatCompletionClient(
 # === Memory === 
 # user_memory = ListMemory()
 
-
+# === Prompts ===
 PLANNER_PROMPT = """
 You are a research planning expert for literature review systems.
 
@@ -137,60 +137,176 @@ PLAN:
 3. Review and select the 3 most relevant papers based on recency, relevance, and coverage
 4. Write a comprehensive literature review synthesizing the selected papers
 
-Example for topic "Quantum computing applications":
-
-PLAN:
-1. Search arXiv for 12 papers on "quantum computing optimization algorithms"
-2. Search arXiv for 6 papers on "quantum machine learning applications"
-3. Review and select the 5 most impactful papers across both searches
-4. Write a literature review highlighting practical applications and future directions
-
 FEEDBACK HANDLING:
 - If human requests more papers: Increase the numbers in search steps
 - If human wants different focus: Adjust search query keywords
 - If human wants additional topics: Add a new search step
 - If human wants fewer steps: Consolidate searches or remove optional steps
 
+After generating the plan, present it to the User for review and approval.
 """
 
-# -- Input function
+ORCHESTRATOR_PROMPT = """
+You are an orchestration coordinator that executes research plans step-by-step.
+
+Your workflow:
+1. Look for the approved PLAN in the conversation history
+2. Execute each step in order by delegating to the appropriate worker agent
+3. Clearly state which step you are executing
+4. Verify each step is completed before moving to the next
+
+Available workers:
+- Researcher: Searches for academic papers using arXiv (use for steps that mention "Search arXiv")
+- Reviewer: Evaluates and selects the most relevant papers (use for steps that mention "Review" or "select")
+- Writer: Creates comprehensive literature reviews (use for steps that mention "Write" or "review")
+
+For each step in the plan:
+- Announce: "Executing Step X: [step description]"
+- Delegate clearly to the appropriate worker
+- Wait for the worker to complete
+- Move to the next step
+
+After all steps are complete, simply announce "EXECUTION COMPLETE" without additional commentary.
+
+Keep your coordination messages brief and clear.
+"""
+
+RESEARCHER_PROMPT = """
+You are a research assistant specialized in academic paper discovery.
+
+Your task:
+1. When asked to search for papers, extract the query and number from the request
+2. Use the search_arXiv tool with those parameters
+3. Return ALL found papers with complete information
+
+Important:
+- Always use the search_arXiv tool when searching for papers
+- Include complete paper information: title, authors, published date, abstract, URL
+- Be thorough and systematic
+- After completing a search, briefly state "SEARCH COMPLETE for [topic]"
+"""
+
+REVIEWER_PROMPT = """
+You are an academic paper reviewer and selector.
+
+Your task:
+1. Review all papers provided by the Researcher
+2. Assess each paper's relevance to the research topic
+3. Rank papers by: relevance, recency, quality, and coverage diversity
+4. Select EXACTLY the number of papers requested
+5. Provide a brief evaluation
+
+Output format:
+- Selection rationale (2-3 sentences explaining your choices)
+- List of selected papers with: title, authors, published date, brief summary, URL, and relevance score (High/Medium/Low)
+
+After completing the review, state "REVIEW SELECTION COMPLETE".
+"""
+
+WRITER_PROMPT = """
+You are an expert academic writer specializing in literature reviews.
+
+Your task is to synthesize selected papers into a cohesive, well-structured literature review.
+
+IMPORTANT: Your ENTIRE response should be the literature review itself. Do NOT add meta-commentary like "Here is the review" or "I have completed the review". Just write the review.
+
+Structure your review:
+1. **Introduction & Scope** (2-3 sentences): Define the research area and its importance
+2. **Thematic Synthesis** (Main section): Identify 2-3 central themes, cite papers, compare approaches
+3. **Methodological Overview**: Summarize research methods used across papers
+4. **Limitations & Gaps**: Identify what's missing or under-explored
+5. **Conclusion & Future Directions**: Summarize current state and suggest future work
+6. **Reviewed Papers**: List all papers with full details (title, authors, date, summary, URL, relevance)
+
+Writing guidelines:
+- Use clear, academic prose with smooth transitions
+- Always cite papers when referencing their work
+- Compare and synthesize across papers (don't just list summaries)
+- Maintain an objective, analytical tone
+- Ensure logical flow between sections
+
+End your review with exactly: "--- END OF LITERATURE REVIEW ---"
+"""
+
+# === Input function (HIL implementation) ===
 def human_input(prompt: str) -> str:
-    return input(f"\nUSER INPUT REQUIRED:\n{prompt}\n> ")
+    """
+    Custom input function for UserProxyAgent
+    """
+    print("\n" + "="*80)
+    print("HUMAN INPUT REQUIRED")
+    print("="*80)
+    print(f"\n{prompt}\n")
+    print("Options:")
+    print("  - Type 'APPROVED' to proceed with the plan")
+    print("  - Type your feedback/changes to revise the plan")
+    print("  - Press Ctrl+C to exit\n")
+    return input("> ").strip()
 
-# -- Cancelation condition
-def is_approved(message: TextMessage) -> bool:
-    approval_words = ["approved", "looks good", "yes", "ok", "proceed"]
-    return any(word in message.content.lower() for word in approval_words)
+# === Agents ===
+user_proxy = UserProxyAgent(
+    name="User",
+    description="Human in the loop for approving or revising plans",
+    input_func=human_input
+)
+
+planner = AssistantAgent(
+    name="Planner",
+    description="Agent responsible for creating the roadmap of the literature review",
+    system_message=PLANNER_PROMPT,
+    model_client=ollama_client_granite
+)
+
+orchestrator = AssistantAgent(
+    name="Orchestrator",
+    description="Coordinates the execution of approved research plans",
+    model_client=ollama_client_granite,
+    system_message=ORCHESTRATOR_PROMPT
+)
+
+researcher = AssistantAgent(
+    name="Researcher",
+    description="Searches for academic papers on arXiv",
+    model_client=ollama_client_llama,
+    tools=[search_arXiv],
+    system_message=RESEARCHER_PROMPT
+)
+
+reviewer = AssistantAgent(
+    name="Reviewer",
+    description="Reviews and selects the most relevant papers",
+    model_client=ollama_client_granite,
+    system_message=REVIEWER_PROMPT
+)
+
+writer = AssistantAgent(
+    name="Writer",
+    description="Writes comprehensive literature reviews from selected papers",
+    model_client=ollama_client_granite,
+    system_message=WRITER_PROMPT
+)
 
 
-user = UserProxyAgent(name="User", description="Human in loop", input_func=human_input)
-planner = AssistantAgent(name="PlannerAgent", description="Agent resposible for planning the roadmap of the literature review", system_message=PLANNER_PROMPT,model_client=ollama_client_granite)
 
+main_termination = (
+    TextMentionTermination("EXECUTION COMPLETE")
+    | TextMentionTermination("END OF LITERATURE REVIEW")
+) 
+
+main_team = SelectorGroupChat(
+    participants=[planner, user_proxy, orchestrator, researcher, reviewer, writer],
+    model_client=ollama_client_granite,
+    termination_condition=main_termination,
+    name="LiteratureReviewSystem",
+    description="Complete literature review system with human-in-the-loop planning"
+)
 
 async def main():
-    cancellation_token = CancellationToken()
-
-    termination_condition = (
-    TextMentionTermination("approved")
-    | TextMentionTermination("looks good")
-    | TextMentionTermination("yes")
-    | TextMentionTermination("ok")
-    | TextMentionTermination("proceed")
-    )
-
-    team = SelectorGroupChat(
-        participants=[user, planner],
-        model_client=ollama_client_granite,
-        termination_condition=termination_condition,
-    )
+ 
 
     task = "Create a research plan for Human-AI interaction and cognitive flow."
 
-    result = team.run_stream(
-        task=task,
-        cancellation_token=cancellation_token,
-    )
-    await Console(result)
+   
     
 
 
